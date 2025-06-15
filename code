@@ -1,10 +1,71 @@
-# Obtener hora actual y calcular una hora atrás
+# REQUIERE EJECUCIÓN COMO ADMINISTRADOR
+if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Ejecuta como Administrador para ver todos los procesos." -ForegroundColor Red
+    Start-Process powershell "-NoProfile -ExecutionPolicy Bypass -Command `"cd '$($PWD.Path)'; & '$($MyInvocation.MyCommand.Path)'`"" -Verb RunAs
+    exit
+}
+
 $limiteTiempo = (Get-Date).AddHours(-1)
+Write-Host "`n=== PROCESOS Y APPS EJECUTADOS EN LA ÚLTIMA HORA ===`n" -ForegroundColor Cyan
 
-Write-Host "`n=== Aplicaciones/procesos iniciados en la última hora ===`n" -ForegroundColor Cyan
+# Función para obtener el usuario dueño del proceso (alternativa sin GetOwner)
+function Get-ProcessOwner {
+    param($ProcessId)
+    try {
+        $process = Get-WmiObject Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        $owner = $process.GetOwner()
+        return "$($owner.Domain)\$($owner.User)"
+    } catch {
+        return "SYSTEM o Error"
+    }
+}
 
-Get-Process |
-Where-Object { $_.StartTime -gt $limiteTiempo } |
-Sort-Object StartTime -Descending |
-Select-Object Name, Id, StartTime, Path |
-Format-Table -AutoSize
+# Método 1: Procesos actuales via WMI (más confiable)
+$procesosWMI = Get-CimInstance -ClassName Win32_Process | ForEach-Object {
+    try {
+        $creationDate = if ($_.CreationDate) { [DateTime]$_.CreationDate } else { $null }
+        if ($creationDate -and $creationDate -gt $limiteTiempo) {
+            [PSCustomObject]@{
+                Name        = $_.Name
+                PID         = $_.ProcessId
+                StartTime   = $creationDate
+                Path        = $_.ExecutablePath
+                User        = (Get-ProcessOwner -ProcessId $_.ProcessId)
+                ParentPID   = $_.ParentProcessId
+                CommandLine = $_.CommandLine
+            }
+        }
+    } catch { Write-Warning "Error en PID $($_.ProcessId): $_" }
+}
+
+# Método 2: Event Logs (para procesos que ya terminaron)
+$eventosProcesos = Get-WinEvent -FilterHashtable @{
+    LogName = 'Security'
+    ID = 4688
+    StartTime = $limiteTiempo
+} -ErrorAction SilentlyContinue | ForEach-Object {
+    $evento = $_
+    $details = @{
+        Name = $evento.Properties[5].Value
+        PID = $evento.Properties[4].Value
+        StartTime = $evento.TimeCreated
+        User = $evento.Properties[1].Value
+    }
+    [PSCustomObject]@{
+        Name      = $details.Name
+        PID       = $details.PID
+        StartTime = $details.StartTime
+        User      = $details.User
+        Source    = "Event Log"
+    }
+}
+
+# Combinar y mostrar resultados
+$resultadoFinal = ($procesosWMI + $eventosProcesos) | Sort-Object StartTime -Descending -Unique
+
+if ($resultadoFinal) {
+    $resultadoFinal | Out-GridView -Title "Procesos/Apps (Última hora) - Total: $($resultadoFinal.Count)"
+    $resultadoFinal | Export-Csv -Path "$env:USERPROFILE\Desktop\Procesos_Completos_$((Get-Date).ToString('yyyyMMdd_HHmmss')).csv" -NoTypeInformation
+} else {
+    Write-Host "No se encontraron procesos nuevos en la última hora." -ForegroundColor Yellow
+}
