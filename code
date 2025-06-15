@@ -1,0 +1,10 @@
+# Obtener hora actual y calcular una hora atrás
+$limiteTiempo = (Get-Date).AddHours(-1)
+
+Write-Host "`n=== Aplicaciones/procesos iniciados en la última hora ===`n" -ForegroundColor Cyan
+
+Get-Process |
+Where-Object { $_.StartTime -gt $limiteTiempo } |
+Sort-Object StartTime -Descending |
+Select-Object Name, Id, StartTime, Path |
+Format-Table -AutoSize
